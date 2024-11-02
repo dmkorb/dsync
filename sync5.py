@@ -9,7 +9,9 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
+import multiprocessing
 import yaml
 import fnmatch
 from watchdog.observers import Observer
@@ -240,45 +242,82 @@ def perform_initial_sync(source_dir, destination_dir, exclude_patterns=None, con
             os.makedirs(destination_dir, exist_ok=True)
         logging.info(f"Created destination directory: {destination_dir}")
 
-    # First, count total files for progress bar
-    total_files = 0
+    # First pass: Collect all files and their metadata
     files_to_sync = []
-    for root, dirs, files in os.walk(source_dir):
-        if config.get('skip_hidden', True):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
-        
-        for file in files:
-            src_file = os.path.join(root, file)
-            if not handler.should_exclude(src_file):
-                total_files += 1
-                files_to_sync.append(src_file)
-
-    # Sync files from source to destination with progress bar
     source_files = set()
-    with tqdm(total=total_files, desc="Initial sync", unit="files") as pbar:
-        for src_file in files_to_sync:
+    
+    with tqdm(desc="Scanning files", unit="files") as scan_pbar:
+        for root, dirs, files in os.walk(source_dir):
+            if config.get('skip_hidden', True):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+            
+            for file in files:
+                src_file = os.path.join(root, file)
+                if not handler.should_exclude(src_file):
+                    files_to_sync.append(src_file)
+                    source_files.add(os.path.relpath(src_file, source_dir))
+                    scan_pbar.update(1)
+
+    # Define a worker function for parallel processing
+    def sync_worker(src_file):
+        try:
             handler.sync_file(src_file)
-            source_files.add(os.path.relpath(src_file, source_dir))
-            pbar.update(1)
+            return True
+        except Exception as e:
+            logging.error(f"Error syncing {src_file}: {e}")
+            return False
 
-    # Handle files that exist in destination but not in source
-    dest_files_to_check = []
-    for root, dirs, files in os.walk(destination_dir):
-        for file in files:
-            dest_file = os.path.join(root, file)
-            if not handler.should_exclude(dest_file):
-                dest_files_to_check.append((dest_file, os.path.relpath(dest_file, destination_dir)))
-
-    if dest_files_to_check:
-        with tqdm(total=len(dest_files_to_check), desc="Checking destination files", unit="files") as pbar:
-            for dest_file, rel_path in dest_files_to_check:
-                if rel_path not in source_files:
-                    src_path = os.path.join(source_dir, rel_path)
-                    handler.handle_delete(src_path)
+    # Use ThreadPoolExecutor for I/O-bound operations
+    max_workers = min(32, (multiprocessing.cpu_count() * 2))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with tqdm(total=len(files_to_sync), desc="Initial sync", unit="files") as pbar:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(sync_worker, src_file): src_file 
+                for src_file in files_to_sync
+            }
+            
+            # Process completed tasks
+            for future in as_completed(future_to_file):
+                src_file = future_to_file[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logging.error(f"Error processing {src_file}: {e}")
                 pbar.update(1)
 
-    logging.info("Initial sync completed")
+    # Optimize destination file checking
+    dest_files_to_check = []
+    with tqdm(desc="Scanning destination", unit="files") as scan_pbar:
+        for root, dirs, files in os.walk(destination_dir):
+            for file in files:
+                dest_file = os.path.join(root, file)
+                if not handler.should_exclude(dest_file):
+                    rel_path = os.path.relpath(dest_file, destination_dir)
+                    if rel_path not in source_files:
+                        dest_files_to_check.append((dest_file, rel_path))
+                    scan_pbar.update(1)
 
+    if dest_files_to_check:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            with tqdm(total=len(dest_files_to_check), desc="Cleaning destination", unit="files") as pbar:
+                def delete_worker(file_info):
+                    dest_file, rel_path = file_info
+                    src_path = os.path.join(source_dir, rel_path)
+                    handler.handle_delete(src_path)
+                    return True
+
+                # Submit all delete tasks
+                future_to_file = {
+                    executor.submit(delete_worker, file_info): file_info[0]
+                    for file_info in dest_files_to_check
+                }
+                
+                # Process completed tasks
+                for future in as_completed(future_to_file):
+                    pbar.update(1)
+
+    logging.info("Initial sync completed")
 
 def get_mount_point(uuid):
     try:

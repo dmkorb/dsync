@@ -8,6 +8,8 @@ import hashlib
 import logging
 from datetime import datetime
 from pathlib import Path
+from tqdm import tqdm
+
 import yaml
 import fnmatch
 from watchdog.observers import Observer
@@ -53,6 +55,30 @@ class SyncHandler(FileSystemEventHandler):
         }
         self.conflict_settings.update(self.config.get('conflict_resolution', {}))
 
+    def on_created(self, event):
+        if event.is_directory or self.is_syncing:
+            return
+        self.sync_file(event.src_path)
+
+    def on_modified(self, event):
+        if event.is_directory or self.is_syncing:
+            return
+        self.sync_file(event.src_path)
+
+    def on_moved(self, event):
+        if event.is_directory or self.is_syncing:
+            return
+        # Handle the deletion of the old file
+        self.handle_delete(event.src_path)
+        # Handle the creation of the new file if it's still in the watched directory
+        if event.dest_path.startswith(self.source_dir):
+            self.sync_file(event.dest_path)
+
+    def on_deleted(self, event):
+        if event.is_directory or self.is_syncing:
+            return
+        self.handle_delete(event.src_path)
+
     def should_exclude(self, path):
         """
         Check if a file should be excluded based on patterns and settings.
@@ -81,6 +107,7 @@ class SyncHandler(FileSystemEventHandler):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         base_name, ext = os.path.splitext(filename)
         trash_name = f"{base_name}_{timestamp}{ext}"
+        logging.info(f"Trash location: {os.path.join(trash_dir, trash_name)}")
         return os.path.join(trash_dir, trash_name)
 
     def get_duplicate_path(self, dest_path):
@@ -95,6 +122,28 @@ class SyncHandler(FileSystemEventHandler):
             ext=ext
         )
         return os.path.join(os.path.dirname(dest_path), new_name)
+
+    def cleanup_empty_dirs(self, directory):
+        """
+        Recursively remove empty directories starting from the given directory.
+        """
+        if not os.path.exists(directory):
+            return
+
+        # Don't delete the root destination directory
+        if directory == self.destination_dir:
+            return
+
+        try:
+            # Check if directory is empty
+            if not os.listdir(directory):
+                os.rmdir(directory)
+                logging.info(f"Removed empty directory: {os.path.relpath(directory, self.destination_dir)}")
+                # Recursively check parent directory
+                self.cleanup_empty_dirs(os.path.dirname(directory))
+        except OSError:
+            # Handle any permissions or other OS errors
+            pass
 
     def handle_delete(self, src_path):
         try:
@@ -192,31 +241,42 @@ def perform_initial_sync(source_dir, destination_dir, exclude_patterns=None, con
             os.makedirs(destination_dir, exist_ok=True)
         logging.info(f"Created destination directory: {destination_dir}")
 
-    # Sync files from source to destination
-    source_files = set()
+    # First, count total files for progress bar
+    total_files = 0
+    files_to_sync = []
     for root, dirs, files in os.walk(source_dir):
         if config.get('skip_hidden', True):
             dirs[:] = [d for d in dirs if not d.startswith('.')]
         
         for file in files:
             src_file = os.path.join(root, file)
-            if handler.should_exclude(src_file):
-                continue
+            if not handler.should_exclude(src_file):
+                total_files += 1
+                files_to_sync.append(src_file)
+
+    # Sync files from source to destination with progress bar
+    source_files = set()
+    with tqdm(total=total_files, desc="Initial sync", unit="files") as pbar:
+        for src_file in files_to_sync:
             handler.sync_file(src_file)
             source_files.add(os.path.relpath(src_file, source_dir))
+            pbar.update(1)
 
     # Handle files that exist in destination but not in source
+    dest_files_to_check = []
     for root, dirs, files in os.walk(destination_dir):
         for file in files:
             dest_file = os.path.join(root, file)
-            rel_path = os.path.relpath(dest_file, destination_dir)
-            
-            if handler.should_exclude(dest_file):
-                continue
-                
-            if rel_path not in source_files:
-                src_path = os.path.join(source_dir, rel_path)
-                handler.handle_delete(src_path)
+            if not handler.should_exclude(dest_file):
+                dest_files_to_check.append((dest_file, os.path.relpath(dest_file, destination_dir)))
+
+    if dest_files_to_check:
+        with tqdm(total=len(dest_files_to_check), desc="Checking destination files", unit="files") as pbar:
+            for dest_file, rel_path in dest_files_to_check:
+                if rel_path not in source_files:
+                    src_path = os.path.join(source_dir, rel_path)
+                    handler.handle_delete(src_path)
+                pbar.update(1)
 
     logging.info("Initial sync completed")
 

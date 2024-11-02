@@ -1,0 +1,25 @@
+{
+  "ssd_configs": {
+    "B01B63DB-C82D-4278-8AD3-9D99C015990A": {
+      "sync_pairs": [
+        ["~/Pictures/Exported", "Media/Exported"],
+        ["~/Documents", "Backups/Documents"]
+      ],
+      "sync_interval": 0
+    },
+    "yyy-yyy": {
+      "sync_pairs": [
+        ["~/Music", "Media/Music"],
+        ["~/Videos", "Media/Videos"]
+      ],
+      "sync_interval": 60
+    }
+  },
+  "conflict_resolution": "keep_both",
+  "delete_mode": "move_to_trash",
+  "exclude_patterns": [
+    ".DS_Store",
+    "Thumbs.db",
+    ".git"
+  ]
+}

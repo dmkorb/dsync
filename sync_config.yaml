@@ -1,0 +1,37 @@
+# Sync App Configuration
+
+# Global settings
+settings:
+  # Log level (DEBUG, INFO, WARNING, ERROR)
+  log_level: INFO
+  # Whether to skip hidden files (starting with .)
+  skip_hidden: true
+  # Whether to clean up empty directories
+  cleanup_empty_dirs: true
+  
+  # Default conflict resolution settings
+  conflict_resolution:
+    # What to do when files are deleted (options: trash, delete, keep)
+    deleted_files: trash
+    # What to do when files are modified (options: keep_both, overwrite, keep_newest)
+    modified_files: keep_both
+    # Directory for trash (relative to each destination)
+    trash_dir: ".trash"
+    # Format for duplicate files when keeping both (supports strftime formatting)
+    duplicate_format: "{original_name}_{timestamp}{ext}"
+
+# SSD configurations
+ssd_configs:
+  "B01B63DB-C82D-4278-8AD3-9D99C015990A":
+    sync_pairs:
+      - source: "~/Google Drive/My Drive/Media"
+        destination: "Media Backup"
+        exclude:
+          - "*.tmp"
+          - "*.DS_Store"
+        # Optional: Override default conflict resolution for this sync pair
+        conflict_resolution:
+          deleted_files: trash
+          modified_files: overwrite
+          trash_dir: ".trash/pictures"
+          

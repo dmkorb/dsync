@@ -145,37 +145,6 @@ class SyncHandler(FileSystemEventHandler):
             # Handle any permissions or other OS errors
             pass
 
-    def handle_delete(self, src_path):
-        try:
-            self.is_syncing = True
-            rel_path = os.path.relpath(src_path, self.source_dir)
-            dest_path = os.path.join(self.destination_dir, rel_path)
-
-            if not os.path.exists(dest_path):
-                return
-
-            if self.dry_run:
-                logging.info(f"Would handle deletion of: {rel_path}")
-                return
-
-            if self.conflict_settings['deleted_files'] == 'trash':
-                # Move to trash
-                trash_path = self.get_trash_path(os.path.basename(dest_path))
-                os.makedirs(os.path.dirname(trash_path), exist_ok=True)
-                shutil.move(dest_path, trash_path)
-                logging.info(f"Moved to trash: {rel_path}")
-            elif self.conflict_settings['deleted_files'] == 'delete':
-                # Delete permanently
-                os.remove(dest_path)
-                logging.info(f"Deleted: {rel_path}")
-            # If 'keep', do nothing
-
-            # Clean up empty directories if configured
-            if self.config.get('cleanup_empty_dirs', True):
-                self.cleanup_empty_dirs(os.path.dirname(dest_path))
-        finally:
-            self.is_syncing = False
-
     def sync_file(self, src_path):
         try:
             self.is_syncing = True
@@ -194,27 +163,57 @@ class SyncHandler(FileSystemEventHandler):
                     # Create a new copy with timestamp
                     new_dest_path = self.get_duplicate_path(dest_path)
                     if self.dry_run:
-                        logging.info(f"Would create new version: {os.path.basename(new_dest_path)}")
+                        log_sync_action("Would create new version", src_path, new_dest_path)
                     else:
                         os.makedirs(os.path.dirname(new_dest_path), exist_ok=True)
                         shutil.copy2(src_path, new_dest_path)
-                        logging.info(f"Created new version: {os.path.relpath(new_dest_path, self.destination_dir)}")
+                        log_sync_action("Created new version", src_path, new_dest_path)
                 elif self.conflict_settings['modified_files'] == 'keep_newest':
                     if os.path.getmtime(src_path) > os.path.getmtime(dest_path):
                         if not self.dry_run:
                             shutil.copy2(src_path, dest_path)
-                            logging.info(f"Updated (newer): {rel_path}")
+                            log_sync_action("Updated (newer)", src_path, dest_path)
                 else:  # 'overwrite'
                     if not self.dry_run:
                         shutil.copy2(src_path, dest_path)
-                        logging.info(f"Updated: {rel_path}")
+                        log_sync_action("Updated", src_path, dest_path)
+                    else:
+                        log_sync_action("Would sync", src_path, dest_path)
             else:
-                if self.dry_run:
-                    logging.info(f"Would sync: {rel_path}")
-                else:
                     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                     shutil.copy2(src_path, dest_path)
-                    logging.info(f"Synced: {rel_path}")
+                    log_sync_action("Synced", src_path, dest_path)
+        finally:
+            self.is_syncing = False
+
+    def handle_delete(self, src_path):
+        try:
+            self.is_syncing = True
+            rel_path = os.path.relpath(src_path, self.source_dir)
+            dest_path = os.path.join(self.destination_dir, rel_path)
+
+            if not os.path.exists(dest_path):
+                return
+
+            if self.dry_run:
+                log_sync_action("Would handle deletion", src_path, dest_path)
+                return
+
+            if self.conflict_settings['deleted_files'] == 'trash':
+                # Move to trash
+                trash_path = self.get_trash_path(os.path.basename(dest_path))
+                os.makedirs(os.path.dirname(trash_path), exist_ok=True)
+                shutil.move(dest_path, trash_path)
+                log_sync_action("Moved to trash", dest_path, trash_path)
+            elif self.conflict_settings['deleted_files'] == 'delete':
+                # Delete permanently
+                os.remove(dest_path)
+                log_sync_action("Deleted", dest_path, details="permanent deletion")
+            # If 'keep', do nothing
+
+            # Clean up empty directories if configured
+            if self.config.get('cleanup_empty_dirs', True):
+                    self.cleanup_empty_dirs(os.path.dirname(dest_path))
         finally:
             self.is_syncing = False
 
@@ -294,6 +293,23 @@ def get_mount_point(uuid):
 
 def is_ssd_connected(uuid):
     return get_mount_point(uuid) is not None
+
+def log_sync_action(action, src_path, dest_path=None, details=None):
+    """Helper function to consistently log sync actions with full paths"""
+    msg = f"{action}: {os.path.abspath(src_path)}"
+    if dest_path:
+        msg += f" -> {os.path.abspath(dest_path)}"
+    if details:
+        msg += f" ({details})"
+    logging.info(msg)
+
+def log_conflict_resolution(resolution, src_path, dest_path, action_taken):
+    """Helper function to log conflict resolutions"""
+    msg = f"Conflict detected between:\n" \
+          f"  Source:      {os.path.abspath(src_path)}\n" \
+          f"  Destination: {os.path.abspath(dest_path)}\n" \
+          f"Resolution '{resolution}' applied: {action_taken}"
+    logging.info(msg)
 
 def main():
     parser = argparse.ArgumentParser(description="Sync files to specific SSDs")
